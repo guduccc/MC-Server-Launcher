@@ -1,0 +1,15 @@
+# 运行期自动生成的内容，不需要进版本库 / 分发包
+__pycache__/
+*.py[cod]
+panel.json
+servers/
+*.log
+.part
+.webview/
+.appwindow/
+
+# 打包产物（exe 走 release 分发，不进源码库）
+build/
+dist/
+.buildenv/
+*.spec

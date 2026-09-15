@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MC Panel · Minecraft 面板开服器</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="login-layer" class="login-layer hidden">
+  <form class="login-card" id="login-form">
+    <div class="logo-big">MC</div>
+    <h2>MC Panel 控制台</h2>
+    <p class="muted">请输入面板密码</p>
+    <input type="password" id="login-password" placeholder="面板密码" autocomplete="current-password">
+    <button class="btn primary block" type="submit">登录</button>
+    <p class="err" id="login-error"></p>
+  </form>
+</div>
+
+<div class="app" id="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="logo">MC</span>
+      <div>
+        <b>MC Panel</b>
+        <small>面板开服器 v<span id="ver">1.0.0</span></small>
+      </div>
+    </div>
+
+    <button class="btn primary block" id="btn-new">＋ 新建实例</button>
+
+    <div class="side-title">服务端实例 <span class="badge" id="running-count">0</span></div>
+    <div class="inst-list" id="inst-list"></div>
+
+    <div class="side-foot">
+      <div class="kv"><span>监听</span><b id="info-host">-</b></div>
+      <div class="kv"><span>内网 IP</span><b id="info-ip">-</b></div>
+      <div class="kv"><span>实例目录</span><b id="info-dir" class="ellipsis">-</b></div>
+      <button class="btn ghost small block" id="btn-panel-settings">面板设置</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="head-left">
+        <h1 id="cur-name">未选择实例</h1>
+        <div class="chips">
+          <span class="chip" id="cur-core">-</span>
+          <span class="chip" id="cur-port">端口 -</span>
+          <span class="status" id="cur-state">空闲</span>
+        </div>
+      </div>
+      <div class="head-right">
+        <div class="stat" title="CPU 占用（多核合计，100% = 一个核心满载）"><label>CPU</label><b id="stat-cpu">-</b></div>
+        <div class="stat" title="内存占用"><label>内存</label><b id="stat-mem">-</b></div>
+        <div class="stat" title="已运行时间"><label>运行</label><b id="stat-up">-</b></div>
+        <div class="stat" title="在线玩家"><label>玩家</label><b id="stat-players">-</b></div>
+        <div class="actions">
+          <button class="btn success" id="act-start">启动</button>
+          <button class="btn warn" id="act-restart">重启</button>
+          <button class="btn" id="act-stop">停止</button>
+          <button class="btn danger ghost" id="act-kill" title="强制结束进程">强杀</button>
+        </div>
+      </div>
+    </header>
+
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-tab="console">控制台</button>
+      <button class="tab" data-tab="players">玩家</button>
+      <button class="tab" data-tab="props">服务端配置</button>
+      <button class="tab" data-tab="files">文件</button>
+      <button class="tab" data-tab="settings">实例设置</button>
+      <button class="tab" data-tab="install">安装 / 升级</button>
+    </nav>
+
+    <section class="content">
+
+      <!-- 控制台 -->
+      <div class="pane active" data-pane="console">
+        <div class="console-toolbar">
+          <label class="switch"><input type="checkbox" id="auto-scroll" checked><span>自动滚动</span></label>
+          <label class="switch"><input type="checkbox" id="hide-progress"><span>过滤刷屏</span></label>
+          <span class="spacer"></span>
+          <button class="btn ghost small" id="console-copy">复制全部</button>
+          <button class="btn ghost small" id="console-clear">清屏</button>
+        </div>
+        <div class="console" id="console"></div>
+        <div class="quick" id="quick-cmds"></div>
+        <form class="cmdbar" id="cmd-form">
+          <span class="prompt">›</span>
+          <input id="cmd-input" placeholder="输入服务端指令（如 list / op Steve / say 你好），↑↓ 翻历史" autocomplete="off" spellcheck="false">
+          <button class="btn primary" type="submit">发送</button>
+        </form>
+      </div>
+
+      <!-- 玩家 -->
+      <div class="pane" data-pane="players">
+        <div class="card">
+          <div class="card-head"><b>在线玩家</b><span class="muted" id="players-hint">数据来自服务端日志</span></div>
+          <div id="player-grid" class="player-grid"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><b>常用管理指令</b></div>
+          <div class="quick" id="admin-cmds"></div>
+        </div>
+      </div>
+
+      <!-- 配置 -->
+      <div class="pane" data-pane="props">
+        <div class="sticky-bar">
+          <span class="muted" id="props-path">server.properties</span>
+          <span class="spacer"></span>
+          <span class="muted" id="props-dirty">未修改</span>
+          <button class="btn ghost small" id="props-reload">重新加载</button>
+          <button class="btn primary small" id="props-save">保存修改</button>
+        </div>
+        <div id="props-form"></div>
+      </div>
+
+      <!-- 文件 -->
+      <div class="pane" data-pane="files">
+        <div class="sticky-bar">
+          <div class="crumb" id="file-crumb"></div>
+          <span class="spacer"></span>
+          <label class="btn ghost small" for="file-upload">上传文件</label>
+          <input type="file" id="file-upload" multiple hidden>
+          <button class="btn ghost small" id="file-mkdir">新建文件夹</button>
+          <button class="btn ghost small" id="file-refresh">刷新</button>
+        </div>
+        <div class="file-list" id="file-list"></div>
+      </div>
+
+      <!-- 实例设置 -->
+      <div class="pane" data-pane="settings">
+        <div class="grid2">
+          <div class="card">
+            <div class="card-head"><b>运行配置</b></div>
+            <div class="form">
+              <label>核心类型</label>
+              <input id="set-core" readonly class="readonly">
+              <label>游戏版本</label>
+              <input id="set-version">
+              <label>Java 路径</label>
+              <select id="set-java"></select>
+              <div class="row">
+                <div><label>最小内存 (MB)</label><input type="number" id="set-minmem" min="256" step="256"></div>
+                <div><label>最大内存 (MB)</label><input type="number" id="set-maxmem" min="512" step="256"></div>
+              </div>
+              <label>JVM 参数</label>
+              <div class="presets" id="jvm-presets"></div>
+              <textarea id="set-jvm" rows="4" spellcheck="false"></textarea>
+              <label>服务端参数</label>
+              <input id="set-serverargs" placeholder="nogui">
+              <label>停机最长等待（秒）</label>
+              <input type="number" id="set-stoptimeout" min="10" max="600" step="10" title="服务端保存世界数据的等待上限，大世界建议调大">
+              <label>备注</label>
+              <input id="set-note" placeholder="例如：1.12.2 工业服">
+              <label class="check"><input type="checkbox" id="set-eula"><span>自动同意 EULA（eula.txt = true）</span></label>
+              <label class="check"><input type="checkbox" id="set-autorestart"><span>进程异常退出时自动重启</span></label>
+              <div class="row end">
+                <button class="btn primary" id="set-save">保存设置</button>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div class="card">
+              <div class="card-head"><b>实例信息</b></div>
+              <div class="kv-list" id="set-info"></div>
+            </div>
+            <div class="card danger-zone">
+              <div class="card-head"><b>危险操作</b></div>
+              <p class="muted small">删除实例会移除面板中的记录并停止进程，建议先备份世界存档。</p>
+              <div class="row">
+                <label class="check"><input type="checkbox" id="del-files"><span>同时删除实例目录及全部文件</span></label>
+              </div>
+              <div class="row end">
+                <button class="btn danger" id="set-delete">删除实例</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 安装 -->
+      <div class="pane" data-pane="install">
+        <div class="grid2">
+          <div class="card">
+            <div class="card-head"><b>下载服务端核心</b><span class="muted small">安装期间可看控制台日志</span></div>
+            <div class="form">
+              <label>核心类型</label>
+              <div class="core-grid" id="core-grid"></div>
+              <label>游戏版本 <span class="muted small" id="ver-hint"></span></label>
+              <div class="row">
+                <input id="ins-version" list="version-list" placeholder="例如 1.20.1 / 1.12.2" autocomplete="off">
+                <datalist id="version-list"></datalist>
+                <button class="btn ghost" id="ver-load">拉取列表</button>
+              </div>
+              <label class="check"><input type="checkbox" id="ver-release-only" checked><span>只保留正式版</span></label>
+              <label>构建版本（可选，留空取最新）</label>
+              <div class="row">
+                <input id="ins-build" list="build-list" placeholder="latest" autocomplete="off">
+                <datalist id="build-list"></datalist>
+                <button class="btn ghost" id="build-load">查询构建</button>
+              </div>
+              <p class="muted small" id="ins-tip"></p>
+              <div class="row end">
+                <button class="btn primary" id="ins-go">开始下载 / 安装</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><b>安装进度</b></div>
+            <div class="progress"><div class="bar" id="task-bar"></div></div>
+            <div class="kv"><span>阶段</span><b id="task-phase">-</b></div>
+            <div class="kv"><span>状态</span><b id="task-msg">-</b></div>
+            <p class="muted small" id="task-err"></p>
+            <div class="split"></div>
+            <div class="card-head"><b>当前核心</b></div>
+            <div class="kv-list" id="ins-current"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="modal-backdrop hidden" id="modal">
+  <div class="modal" id="modal-box"></div>
+</div>
+<div class="toasts" id="toasts"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+{
+  "host": "127.0.0.1",
+  "port": 18512,
+  "open_browser": false,
+  "password": "",
+  "servers_dir": "servers",
+  "java_path": "",
+  "console_buffer": 3000,
+  "auto_scan_java": true
+}
