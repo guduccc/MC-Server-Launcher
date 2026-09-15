@@ -12,6 +12,21 @@ from typing import Any, Iterable
 
 # ---------------------------------------------------------------- 运行形态
 
+def has_console() -> bool:
+    """当前是否有可见的控制台窗口。
+
+    打包成 --windowed 的 exe 时 sys.stdout 是 None，print 用户根本看不到；
+    这种场景下关键提示必须走弹窗，否则用户只会觉得"点了没反应"。
+    """
+    stream = sys.stdout
+    if stream is None:
+        return False
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
 def is_frozen() -> bool:
     """是否以 PyInstaller 打包后的 exe 在跑。"""
     return bool(getattr(sys, "frozen", False))
@@ -193,6 +208,24 @@ def safe_join(root: Path, rel: str | None) -> Path:
     if target != root and root not in target.parents:
         raise ValueError("非法路径")
     return target
+
+
+def rel_posix(target: Path, root: Path) -> str:
+    """把 target 表示成相对 root 的 posix 路径（给界面显示用）。
+
+    不要直接 `target.relative_to(root)`：
+    safe_join 返回的是 resolve() 之后的路径，而实例根目录有可能是未解析的写法。
+    Windows 上只要路径里含 8.3 短名（例如临时目录写成 C:\\Users\\ZHEBUS~1\\...），
+    两者就对不上，relative_to 会抛
+    `ValueError: ... is not in the subpath of ...`。
+    """
+    target = Path(target).resolve()
+    root = Path(root).resolve()
+    try:
+        return target.relative_to(root).as_posix()
+    except ValueError:
+        # 兜底：至少不要因为显示路径把功能搞挂
+        return target.name if target.name else ""
 
 
 def unique_name(base: str, exists: Iterable[str]) -> str:

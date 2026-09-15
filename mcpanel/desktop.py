@@ -49,6 +49,91 @@ def pywebview_available() -> bool:
     return True
 
 
+# WebView2 运行时的注册表键（运行时 / Beta / Dev / Canary 四个通道都认）
+_WEBVIEW2_CLIENTS = (
+    r"Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+    r"Microsoft\EdgeUpdate\Clients\{2CD8A007-E189-409D-A2C8-9AF4EF3C72AA}",
+    r"Microsoft\EdgeUpdate\Clients\{0D50BFEC-CD6A-4F9A-964C-C7416E3ACB10}",
+    r"Microsoft\EdgeUpdate\Clients\{65C35B14-6C1D-4122-AC46-7148CC9D6497}",
+    r"WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+    r"WOW6432Node\Microsoft\EdgeUpdate\Clients\{2CD8A007-E189-409D-A2C8-9AF4EF3C72AA}",
+    r"WOW6432Node\Microsoft\EdgeUpdate\Clients\{0D50BFEC-CD6A-4F9A-964C-C7416E3ACB10}",
+    r"WOW6432Node\Microsoft\EdgeUpdate\Clients\{65C35B14-6C1D-4122-AC46-7148CC9D6497}",
+)
+
+
+def _version_tuple(text, length: int = 4) -> tuple:
+    parts = [0] * length
+    for index, chunk in enumerate(str(text).split(".")[:length]):
+        try:
+            parts[index] = int(chunk)
+        except ValueError:
+            parts[index] = 0
+    return tuple(parts)
+
+
+def webview2_version() -> str:
+    """本机 WebView2 运行时的版本号；没装返回空串。"""
+    if os.environ.get("WEBVIEW2_RUNTIME_PATH"):
+        return "env"
+    import winreg
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for key in _WEBVIEW2_CLIENTS:
+            try:
+                with winreg.OpenKey(hive, "SOFTWARE\\" + key) as handle:
+                    return str(winreg.QueryValueEx(handle, "pv")[0])
+            except OSError:
+                continue
+    return ""
+
+
+def webview2_available() -> bool:
+    """pywebview 到底会不会用 Chromium 内核。
+
+    这一步是必须的：pywebview 只在「.NET ≥ 4.6.2 **且** 装了 WebView2 运行时」时
+    才走 Chromium，条件不满足会**静默**退回 MSHTML —— 也就是 IE11 的 Trident 内核。
+    表现极具迷惑性：窗口正常弹出、布局大致还在、蓝绿按钮也有颜色（因为那几个是
+    硬编码 hex），但 `var(--x)` 全部失效、flex 的 gap 全部失效、JS 一进门就是语法错误。
+    于是就成了「界面像半成品，功能全点不动」。Windows Server 2019 默认没装 WebView2，
+    所以在这里必须先探一次，别等窗口开出来才发现。
+    """
+    if os.name != "nt":
+        return False
+    if os.environ.get("WEBVIEW2_RUNTIME_PATH"):
+        return True
+    import winreg
+    try:
+        with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full") as handle:
+            release = winreg.QueryValueEx(handle, "Release")[0]
+    except OSError:
+        return False
+    if release < 394802:                     # 低于 .NET 4.6.2 一样会退 MSHTML
+        return False
+    build = webview2_version()
+    if not build:
+        return False
+    return _version_tuple(build) >= _version_tuple("86.0.622.0")
+
+
+WEBVIEW2_HINT = (
+    "这台机器没装 Microsoft Edge WebView2 运行时。\n\n"
+    "没有它，pywebview 会偷偷退回 IE(MSHTML) 内核来渲染网页界面：\n"
+    "  · CSS 变量全部失效 → 深色主题没了，变成白底黑字\n"
+    "  · gap / grid 失效 → 控件挤在一起\n"
+    "  · 前端 JS 直接语法报错 → 按钮点了完全没反应\n"
+    "（在浏览器里打开同一个地址是正常的，那不是同一个渲染内核。）\n\n"
+    "解决办法，任选一种：\n"
+    "1. 装 WebView2 运行时（推荐，装一次永久有效）：\n"
+    "   https://developer.microsoft.com/microsoft-edge/webview2/\n"
+    "   下载 “Evergreen Standalone Installer” 的 x64 版装上，重启面板即可\n"
+    "2. 装 Microsoft Edge 或 Chrome，然后用这个参数启动：\n"
+    "   mc-panel.exe --app\n"
+    "3. 只想在浏览器里用：mc-panel.exe --browser"
+)
+
+
 def find_app_browser() -> str | None:
     """找一个能用 --app 模式启动的 Chromium 内核浏览器。"""
     candidates = [
@@ -232,6 +317,41 @@ def run_pywebview(url: str, host: str, port: int, manager, config,
     return 0
 
 
+def open_web_window(url: str, root: Path) -> bool:
+    """把网页界面在外面打开一个独立窗口。**不阻塞**，返回是否成功。
+
+    Qt 界面上那个「切换到网页界面」按钮走的就是这里：
+    优先用 Chromium 的 --app 模式（无地址栏，观感接近原生），
+    没装 Edge/Chrome 就退回系统默认浏览器。
+    """
+    browser = find_app_browser()
+    if browser:
+        profile = root / ".appwindow"
+        try:
+            profile.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            profile = Path(os.environ.get("TEMP", ".")) / "mc-panel-appwindow"
+        cmd = [
+            browser,
+            f"--app={url}",
+            f"--window-size={WINDOW_SIZE[0]},{WINDOW_SIZE[1]}",
+            f"--user-data-dir={profile}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-features=Translate",
+        ]
+        try:
+            subprocess.Popen(cmd)
+            return True
+        except OSError:
+            pass
+    try:
+        import webbrowser
+        return bool(webbrowser.open(url))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def run_app_mode(url: str, browser: str, root: Path, force_stop: bool) -> int:
     """用 Chromium 的 --app 模式开一个无地址栏的独立窗口。"""
     profile = root / ".appwindow"
@@ -279,9 +399,27 @@ def run_desktop(server, config, manager, force_stop: bool = False,
 
     mode = prefer
     if mode is None:
-        mode = "webview" if pywebview_available() else "app"
+        # 顺序很重要：没装 WebView2 时 pywebview 会退到 IE 内核，那比没有界面更糟，
+        # 所以这种情况下宁可退到浏览器窗口模式（--app）。
+        if pywebview_available() and webview2_available():
+            mode = "webview"
+        elif find_app_browser():
+            mode = "app"
+        elif pywebview_available():
+            mode = "webview"
+        else:
+            mode = "browser"
 
     if mode == "webview":
+        if not webview2_available():
+            # 已经走到这儿说明没别的路可退了，只能开个 IE 内核的窗口，
+            # 但必须让人知道为什么界面是坏的，否则只会以为程序坏了。
+            _marker("UI_WEBVIEW2_MISSING")
+            print("[面板] 警告：没装 WebView2 运行时，"
+                  "网页界面会退化成 IE 内核渲染（没样式、按钮失效）。")
+            for line in WEBVIEW2_HINT.splitlines():
+                print(f"        {line}")
+            message_box(WEBVIEW2_HINT, title="缺少 WebView2 运行时", error=True)
         try:
             _marker("UI_MODE=webview")
             return run_pywebview(url, url_host, port, manager, config,

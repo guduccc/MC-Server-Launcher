@@ -16,8 +16,8 @@ from pathlib import Path
 
 from . import downloader, java as javamod, procstat, properties
 from .util import (clean_name, decode_bytes, encode_text, human_bytes,
-                   now, port_available, read_json, safe_join, unique_name,
-                   write_json)
+                   now, port_available, read_json, rel_posix, safe_join,
+                   unique_name, write_json)
 
 # 日志里的事件识别
 RE_JOIN = re.compile(r"\]:\s*([A-Za-z0-9_]{1,16})(?:\[[^\]]*\])?\s+joined the game")
@@ -592,6 +592,9 @@ class Instance:
             raise RuntimeError("目录不存在")
         if target.is_file():
             target = target.parent
+        # 比较/取相对路径统一用 resolve() 后的根：
+        # safe_join 给的是解析后的路径，而 self.root 可能带 8.3 短名，直接用会对不上
+        root_real = self.root.resolve()
         entries = []
         for item in sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
             try:
@@ -602,7 +605,7 @@ class Instance:
                 size, mtime = None, 0
             entries.append({
                 "name": item.name,
-                "path": item.relative_to(self.root).as_posix(),
+                "path": rel_posix(item, root_real),
                 "dir": item.is_dir(),
                 "size": size,
                 "size_text": human_bytes(size) if size is not None else "",
@@ -612,9 +615,9 @@ class Instance:
                              ".cfg", ".toml", ".md", ".log", ".sh", ".bat", ".csv"),
             })
         parent = None
-        if target != self.root:
-            parent = target.parent.relative_to(self.root).as_posix() or ""
-        return {"path": target.relative_to(self.root).as_posix() if target != self.root else "",
+        if target != root_real:
+            parent = rel_posix(target.parent, root_real)
+        return {"path": "" if target == root_real else rel_posix(target, root_real),
                 "parent": parent, "entries": entries}
 
     def read_file(self, rel: str, limit: int = 2 * 1024 * 1024) -> dict:
@@ -673,9 +676,9 @@ class Instance:
         dest = folder / Path(filename).name
         with open(dest, "wb") as fp:
             fp.write(data)
-        self._emit(f"[面板] 已上传 {dest.relative_to(self.root).as_posix()}"
+        self._emit(f"[面板] 已上传 {rel_posix(dest, self.root)}"
                    f"（{human_bytes(len(data))}）", "cmd")
-        return {"ok": True, "path": dest.relative_to(self.root).as_posix()}
+        return {"ok": True, "path": rel_posix(dest, self.root)}
 
     # ============================================================ 安装
     @property

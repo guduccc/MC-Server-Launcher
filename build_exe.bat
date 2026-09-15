@@ -76,6 +76,25 @@ if "%HASWV%"=="1" (
     echo         "%VPY%" -m pip install pywebview
 )
 
+REM Qt 界面版需要独立的 pyqt5 环境（因为 siui 没发布到 PyPI，要从本地源码安装）
+set QTPY=%USERPROFILE%\.workbuddy\binaries\python\envs\pyqt5\Scripts\python.exe
+set HASQT=0
+if exist "%QTPY%" (
+    "%QTPY%" -c "import PyQt5, siui" >nul 2>nul
+    if not errorlevel 1 set HASQT=1
+)
+if "%HASQT%"=="1" (
+    echo         Qt 环境已检测到，可用 build_exe.py --mode qt 打出 Qt 界面版。
+) else (
+    echo         未检测到可用的 Qt 环境（%QTPY% 不存在或缺 PyQt5/siui）。
+    echo         想打 Qt 界面版请先执行：
+    echo           python -m venv "%USERPROFILE%\.workbuddy\binaries\python\envs\pyqt5"
+    echo           "%QTPY%" -m pip install PyQt5 numpy
+    echo           "%QTPY%" -m pip install E:\SRC\PyQt-SiliconUI
+    echo           "%QTPY%" -m pip install pyinstaller
+    echo           "%QTPY%" build_exe.py --mode qt
+)
+
 REM ---------- 5. 生成图标（缺失时才做） ----------
 if not exist "app.ico" (
     echo   [5/6] 生成图标 app.ico ...

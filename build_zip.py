@@ -67,7 +67,11 @@ REQUIRED = [
     "mcpanel/properties.py", "mcpanel/procstat.py", "mcpanel/util.py",
     "mcpanel/web.py",
     "mcpanel/static/index.html", "mcpanel/static/app.js", "mcpanel/static/style.css",
-    # 打包工具链：让拿到源码包的人也能自己打出 exe / 重新打包源码
+    # Qt 界面（可选，但源码包必须完整）
+    "mcpanel/qtui/__init__.py", "mcpanel/qtui/theme.py",
+    "mcpanel/qtui/pages.py", "mcpanel/qtui/window.py",
+    # 启动与打包工具链
+    "run.bat", "run.sh", "run_qt.bat",
     "build_exe.py", "build_exe.bat", "build_zip.py", "build_zip.bat",
     "make_icon.py", "app.ico",
 ]

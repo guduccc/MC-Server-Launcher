@@ -125,10 +125,27 @@ function applyOverview(ov) {
   $('info-ip').textContent = ov.local_ip;
   $('info-dir').textContent = ov.servers_dir;
   updateCounts(ov);
+  updateQtButton(ov);
   renderSidebar();
   renderCoreGrid();
   renderPresets();
 }
+
+function updateQtButton(ov) {
+  const btn = $('act-qt');
+  if (!btn) return;
+  const running = !!(ov && ov.panel && ov.panel.qt_running);
+  btn.classList.toggle('hidden', !running);
+  btn.textContent = 'Qt 界面';
+}
+
+$('act-qt').onclick = async () => {
+  try {
+    const r = await api('/api/focus-qt', { method: 'POST' });
+    if (r.ok) toast('已把 Qt 界面切到前台', 'success');
+    else toast(r.error || '没有正在运行的 Qt 界面', 'warn', 6000);
+  } catch (err) { toast(err.message, 'error'); }
+};
 
 /* ============================================================ 侧边栏 */
 function renderSidebar() {

@@ -13,6 +13,7 @@ import argparse
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -22,8 +23,8 @@ sys.path.insert(0, str(ROOT))
 from mcpanel import __version__                      # noqa: E402
 from mcpanel.config import PanelConfig               # noqa: E402
 from mcpanel.instance import InstanceManager         # noqa: E402
-from mcpanel.util import (app_root, human_bytes, is_frozen,  # noqa: E402
-                          port_available, writable)
+from mcpanel.util import (app_root, has_console, human_bytes,  # noqa: E402
+                          is_frozen, port_available, writable)
 from mcpanel.web import PanelServer                  # noqa: E402
 
 # 打包成 exe 后，数据目录必须是 exe 所在目录
@@ -91,8 +92,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--port", type=int, help="面板监听端口，默认 8080")
     p.add_argument("--password", help="面板访问密码（走网络时强烈建议设置）")
     p.add_argument("--servers-dir", help="服务端实例存放目录")
+    p.add_argument("--qt", action="store_true",
+                   help="用 Qt 原生界面（需要 PyQt5 + PyQt-SiliconUI）")
+    p.add_argument("--web", action="store_true",
+                   help="用网页界面（默认在有 Qt 环境时用 Qt）")
     p.add_argument("--browser", action="store_true",
-                   help="用系统浏览器打开面板（默认是桌面窗口模式）")
+                   help="用系统浏览器打开网页界面")
     p.add_argument("--app", action="store_true",
                    help="用浏览器窗口模式（无地址栏的独立窗口，不需要 pywebview）")
     p.add_argument("--desktop", action="store_true",
@@ -161,13 +166,31 @@ def environment_check(config: PanelConfig, manager: InstanceManager) -> bool:
         ok = False
         print("                ✗ 监听在公网地址却没有设置密码，请加 --password")
 
-    from mcpanel.desktop import find_app_browser, pywebview_available
-    if pywebview_available():
-        print("  界面模式    : 桌面窗口 ✓（pywebview + WebView2，无需浏览器）")
+    from mcpanel.qtui import qt_available, qt_missing_reason
+    from mcpanel.desktop import (find_app_browser, pywebview_available,
+                                 webview2_available, webview2_version)
+    if qt_available():
+        print("  Qt 界面     : ✓ 可用（PyQt5 + PyQt-SiliconUI，原生窗口）")
     else:
-        browser = find_app_browser()
-        print(f"  界面模式    : 浏览器窗口（未安装 pywebview）"
-              f"{'，将用 ' + Path(browser).name if browser else ''}")
+        print("  Qt 界面     : - 不可用")
+        for line in qt_missing_reason().splitlines():
+            print(f"                {line}")
+    browser = find_app_browser()
+    if pywebview_available() and webview2_available():
+        print(f"  网页界面    : 桌面窗口（pywebview + WebView2 {webview2_version()}）")
+    elif pywebview_available():
+        # 这个组合最容易骗人：程序能起、窗口能开，但渲染内核是 IE，
+        # 界面没样式、按钮全点不动。必须在自检里直接点出来。
+        print("  网页界面    : ✗ 装了 pywebview 但没装 WebView2 运行时")
+        print("                原生窗口会退化到 IE(MSHTML) 内核：")
+        print("                深色主题丢失、控件错位、所有按钮点了没反应。")
+        print("                装 WebView2 运行时即可修复（一次装好永久有效）：")
+        print("                https://developer.microsoft.com/microsoft-edge/webview2/")
+        print(f"                或改用浏览器窗口模式：--app"
+              f"{'（' + Path(browser).name + '）' if browser else '（需要先装 Edge / Chrome）'}")
+    else:
+        print(f"  网页界面    : 浏览器窗口"
+              f"{'（' + Path(browser).name + '）' if browser else '（系统默认浏览器）'}")
     print("=" * 58)
     return ok
 
@@ -188,6 +211,37 @@ def free_port(host: str, port: int, tries: int = 20) -> int:
         finally:
             s.close()
     return -1
+
+
+def hard_exit(code: int = 0) -> None:
+    """强制收尾。
+
+    Qt / pythonnet / WebView2 都会留下非守护线程，正常 return 的话解释器
+    会一直等它们，进程永远退不掉（任务管理器里挂着）。所以收尾一律走这里。
+    """
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001
+        pass
+    os._exit(code)
+
+
+def shutdown_ui(server, stop_servers, code: int) -> None:
+    """界面关掉之后的收尾，然后强制退出。**不会返回**。
+
+    `server.stop()` 干的是 `httpd.shutdown()` —— 它要在调用线程里等 httd 的
+    `serve_forever` 收工。实测在 pywebview / pythonnet 收尾之后再调它，
+    会有相当一部分环境下永远等不回来：窗口已经关了、日志也打完「窗口已关闭」，
+    进程却一直挂在任务管理器里，并一直占着 exe（下次打包就报"正被占用"）。
+
+    所以这里不留任何"可能永远等下去"的动作：停 HTTP 服务丢进守护线程就不管了，
+    接着立刻 os._exit。反正进程马上要没了，那个端口交给系统回收即可，
+    没必要礼貌地把 TCP 连接握完。
+    """
+    stop_servers()          # 停服务端实例：内部是有超时上限的，让它正常跑完
+    threading.Thread(target=server.stop, name="http-stop", daemon=True).start()
+    hard_exit(code)
 
 
 def main() -> int:
@@ -267,6 +321,52 @@ def main() -> int:
             print("[面板] 下次启动面板后仍可继续接管它们；"
                   "如需退出时一并关闭，加 --stop-all-on-exit")
 
+    # ---------------------------------------------------------- 选界面
+    # 默认：装了 PyQt5 + PyQt-SiliconUI 就用 Qt 原生界面，否则用网页界面。
+    # --browser/--app/--desktop/--no-browser 都明确指向网页前端，优先级更高。
+    want_qt = bool(args.qt)
+    if args.qt and args.web:
+        print("[面板] --qt 和 --web 不能同时用。")
+        return 1
+    if not args.qt and not args.web and not (
+            args.browser or args.app or args.desktop or args.no_browser):
+        from mcpanel.qtui import qt_available
+        want_qt = qt_available()
+
+    # ---------------------------------------------------------- Qt 界面
+    if want_qt:
+        from mcpanel.qtui import qt_available, qt_missing_reason, run_qt
+        from mcpanel.desktop import wait_port
+        if not qt_available():
+            reason = qt_missing_reason()
+            print("[面板] Qt 界面不可用：")
+            for line in reason.splitlines():
+                print(f"        {line}")
+            if args.qt and not has_console():
+                # 双击 exe 时没有控制台，上面的说明用户一个字都看不到，
+                # 只会觉得"点了没反应"，所以这里必须弹窗。
+                from mcpanel.desktop import message_box
+                message_box(
+                    "这台机器上没装 Qt 界面需要的依赖，暂时只能用网页界面。\n\n"
+                    + reason + "\n\n"
+                    "现在会用网页界面打开；源码方式运行的话，双击 run_qt.bat 就是 Qt 界面。",
+                    error=True)
+            if args.qt:
+                print("[面板] 已自动改用网页界面。\n")
+        else:
+            # HTTP 服务照常在后台跑：Qt 界面上的「切换到网页界面」按钮要用它
+            server.start_background(open_browser=False)
+            url_port = int(config.get("port") or 8080)
+            if not wait_port("127.0.0.1", url_port):
+                print(f"[面板] 提示：HTTP 服务没在 {url_port} 端口起来，"
+                      "「切换到网页界面」可能打不开。")
+            print(f"[面板] Qt 界面启动中…网页版在 http://127.0.0.1:{url_port}/")
+            code = run_qt(server, config, manager,
+                          stop_all_on_exit=args.stop_all_on_exit,
+                          selftest=args.ui_selftest)
+            print("[面板] Qt 界面已关闭")
+            shutdown_ui(server, stop_all, code)
+
     # ---------------------------------------------------------- 桌面窗口模式
     use_desktop = not (args.browser or args.no_browser)
     if use_desktop:
@@ -280,16 +380,7 @@ def main() -> int:
                            selftest=args.ui_selftest,
                            software_render=args.software_render)
         print("[面板] 窗口已关闭")
-        stop_all()
-        server.stop()
-        # 必须强制收尾：pythonnet / WebView2 会留下非守护线程，
-        # 正常 return 的话解释器会一直等它们，进程永远退不掉。
-        try:
-            sys.stdout.flush()
-            sys.stderr.flush()
-        except Exception:  # noqa: BLE001
-            pass
-        os._exit(code)
+        shutdown_ui(server, stop_all, code)
 
     # ------------------------------------------------- 浏览器 / 仅服务模式
     def shutdown(signum=None, frame=None):
@@ -313,7 +404,6 @@ def main() -> int:
             time.sleep(1)
     except KeyboardInterrupt:
         shutdown()
-    return 0
     return 0
 
 

@@ -55,6 +55,7 @@ router.add("GET", r"/static/(?P<file>[\w./\-]+)", "static")
 router.add("POST", r"/api/login", "login")
 router.add("POST", r"/api/logout", "logout")
 router.add("GET", r"/api/session", "session")
+router.add("POST", r"/api/focus-qt", "focus_qt")
 
 router.add("GET", r"/api/overview", "overview")
 router.add("GET", r"/api/java", "java_list")
@@ -253,7 +254,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         instances = [inst.snapshot() for inst in mgr.all()]
         self._json({
             "ok": True,
-            "panel": self.server.config.public(),
+            "panel": self._panel_info(),
             "local_ip": local_ip(),
             "servers_dir": str(mgr.servers_dir),
             "instances": instances,
@@ -269,6 +270,23 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def h_java_refresh(self, **kw):
         self._json({"ok": True, "javas": self.server.manager.javas(refresh=True)})
+
+    def _panel_info(self) -> dict:
+        """面板信息 + Qt 界面是否在跑（网页版据此显示「切换到 Qt 界面」按钮）。"""
+        info = dict(self.server.config.public())
+        info["qt_running"] = getattr(self.server, "qt_activator", None) is not None
+        return info
+
+    def h_focus_qt(self, **kw):
+        """把正在运行的 Qt 界面窗口切到前台。"""
+        activator = getattr(self.server, "qt_activator", None)
+        if activator is None:
+            self._json({"ok": False,
+                        "error": "当前没有正在运行的 Qt 界面。"
+                                 "用 `python panel.py --qt` 启动就能用 Qt 界面。"})
+            return
+        activator()
+        self._json({"ok": True})
 
     def h_cores(self, **kw):
         self._json({"ok": True, "cores": downloader.CORE_INFO, "presets": JVM_PRESETS})
@@ -489,6 +507,9 @@ class PanelServer:
         self.quiet = quiet
         self.httpd: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
+        # Qt 界面在跑时会把自己的窗口激活函数挂到这里，
+        # 网页版点「切换到 Qt 界面」就通过它把窗口叫到前台。
+        self.qt_activator = None
 
     def build(self) -> ThreadingHTTPServer:
         class Bound(PanelHandler):
@@ -504,6 +525,9 @@ class PanelServer:
         # BaseHTTPRequestHandler 通过 self.server 访问，这里把两个属性挂上去
         httpd.manager = self.manager          # type: ignore[attr-defined]
         httpd.config = self.config            # type: ignore[attr-defined]
+        # 注意：请求处理器里的 self.server 是这个 httpd 对象，不是 PanelServer 包装，
+        # 所以 Qt 钩子必须挂到 httpd 上才读得到。
+        httpd.qt_activator = getattr(self, "qt_activator", None)   # type: ignore[attr-defined]
         self.httpd = httpd
         return httpd
 
@@ -526,6 +550,13 @@ class PanelServer:
         if open_browser and self.config.get("open_browser", True):
             threading.Timer(0.8, lambda: webbrowser.open(url)).start()
 
+    def set_qt_activator(self, func) -> None:
+        """登记 Qt 界面的窗口激活函数（网页版据此显示并触发「切换到 Qt 界面」）。"""
+        self.qt_activator = func
+        httpd = getattr(self, "httpd", None)
+        if httpd is not None:
+            httpd.qt_activator = func
+    
     def stop(self) -> None:
         if self.httpd:
             self.httpd.shutdown()

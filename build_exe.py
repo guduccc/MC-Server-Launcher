@@ -41,6 +41,19 @@ VARIANTS = {
         # app.ico 放到包根，运行时给窗口当图标（util.icon_path 会去找）
         "extra": ["--add-data", f"{ROOT / 'app.ico'}{os.pathsep}."],
     },
+    "qt": {
+        "name": "mc-panel-qt",
+        # windowed：双击时不要闪黑框。代价是没有控制台输出，
+        # panel.py 的 setup_console() 会把内容重定向到 exe 旁边的 panel-gui.log。
+        "console": False,
+        "title": "Qt 界面版",
+        "desc": "原生 Qt 界面（PyQt5 + PyQt-SiliconUI），另有「切换到网页界面」按钮",
+        # siui 自带 PyInstaller 钩子；app.ico 放到包根给窗口当图标。
+        # 注意：这个变体必须保留 numpy（siui 的核心模块 import 它），
+        # 所以 EXCLUDES 里那一条要按变体跳过。
+        "extra": ["--add-data", f"{ROOT / 'app.ico'}{os.pathsep}."],
+        "need": ("PyQt5", "siui", "numpy"),
+    },
     "console": {
         "name": "mc-panel-console",
         "console": True,
@@ -212,6 +225,24 @@ def _safe_unlink(path: Path) -> None:
 
 # ================================================================ 打包
 
+def siui_icon_args() -> list[str]:
+    """siui 的图标包是运行时按目录扫描读取的，必须显式打进 exe。
+
+    这个库没有自带 PyInstaller 钩子，漏了它的话 import siui 会在
+    `parser.py reload_internals()` 抛 FileNotFoundError:
+    "...\\_MEIxxxx\\siui\\gui\\icons\\packages"。
+    路径动态取，免得换环境就失效。
+    """
+    try:
+        import siui  # noqa: F401
+    except ImportError:
+        return []
+    pkg = Path(siui.__file__).resolve().parent / "gui" / "icons" / "packages"
+    if not pkg.is_dir():
+        return []
+    return ["--add-data", f"{pkg}{os.pathsep}siui/gui/icons/packages"]
+
+
 def pyinstaller_args(key: str, outdir: Path, work: Path, icon: Path,
                      full: bool = False) -> list[str]:
     info = VARIANTS[key]
@@ -236,8 +267,13 @@ def pyinstaller_args(key: str, outdir: Path, work: Path, icon: Path,
         # 大量删除可能被拦截。默认走增量构建，改过依赖/发现构建结果不对时再加 --full。
         args.append("--clean")
     for mod in EXCLUDES:
+        # siui 的核心模块真的 import numpy，Qt 变体里不能排
+        if key == "qt" and mod == "numpy":
+            continue
         args += ["--exclude-module", mod]
     args += info["extra"]
+    if key == "qt":
+        args += siui_icon_args()
     args.append(str(ROOT / "panel.py"))
     return args
 
@@ -273,10 +309,16 @@ def build_variant(key: str, dist: Path, work: Path, icon: Path,
     except PermissionError:
         print(f"      ✗ {target.name} 正被占用，无法覆盖。")
         print(f"        请先关闭正在运行的 {info['title']}（{target.name}）再重新打包。")
+        print("        任务管理器里看不到它的话，多半是上一次校验留下的孤儿进程，")
+        print(f"        用这条命令按进程树结束：taskkill /F /T /IM {target.name}")
         return 1
     except OSError as exc:
         print(f"      ✗ 产物搬运失败：{exc}")
         return 1
+    # 把这次用的临时输出目录清掉：exe 已经搬走了，剩下的都是零碎。
+    # 不清的话每构建一次就多留一个（实测攒到过 31 个、155MB），
+    # 既占地方又让人分不清哪个才是产物。删不掉也不影响结果。
+    shutil.rmtree(outdir, ignore_errors=True)
     print(f"      ✓ 已生成 {target.name}，体积 {target.stat().st_size / 1048576:.1f} MB")
     return 0
 
@@ -312,6 +354,35 @@ def _wait_api(opener, base: str, proc: subprocess.Popen, seconds: float = 45.0):
     return None
 
 
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """结束进程，连它的子进程一起。
+
+    `--onefile` 打出来的 exe 是个自解压启动器：父进程会把真正的程序作为
+    **子进程**拉起来。只 terminate() 父进程的话，子进程会变成孤儿继续跑，
+    于是 exe 一直被占用 —— 下一次打包就报"正被占用，无法覆盖"。
+    这个坑很隐蔽：本次校验看起来是"通过"的，下一次才炸。
+    所以必须按进程树杀（Windows 上用 taskkill /T）。
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def _report(results: list[tuple[str, bool, str]]) -> bool:
     ok = True
     for name, passed, detail in results:
@@ -339,6 +410,79 @@ def _common_api_checks(opener, base: str, info: dict) -> list[tuple[str, bool, s
     return results
 
 
+def verify_qt(exe: Path, dist: Path) -> int:
+    """Qt 界面版：真开窗口，断言画面渲染出来了 + 接口可用。
+
+    --windowed 打包后 sys.stdout 可能是 None，程序会把输出转向 exe 旁边的
+    panel-gui.log；也可能因为继承了管道而照常输出。所以两个来源都要收。
+    """
+    port = free_port()
+    log = dist / "panel-gui.log"          # 无控制台时程序自己的日志
+    console_log = dist / "verify-stdout.log"   # 有管道时输出落这里
+    pre_size = log.stat().st_size if log.is_file() else 0
+    print(f"      启动 exe 开窗口自检（端口 {port}，约 20 秒）…")
+    try:
+        console_log.unlink()
+    except OSError:
+        pass
+    console_fp = open(console_log, "wb")
+    proc = subprocess.Popen(
+        [str(exe), "--qt", "--port", str(port), "--ui-selftest", "12"],
+        cwd=str(dist), stdout=console_fp, stderr=subprocess.STDOUT,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    base = f"http://127.0.0.1:{port}"
+    text = ""
+    try:
+        info = _wait_api(opener, base, proc, seconds=45)
+        if not info:
+            print("      ✗ 接口没起来（Qt 窗口可能没成功创建）")
+            return 1
+        results = _common_api_checks(opener, base, info)
+        # Qt 是窗口模式，exe 的 stdout 由子进程管道接住，等它自己退出后再读
+        deadline = time.time() + 45
+        while proc.poll() is None and time.time() < deadline:
+            time.sleep(0.5)
+        _kill_tree(proc)
+        console_fp.close()
+
+        # 两个来源都读：无控制台时走 panel-gui.log，有管道时走 verify-stdout.log
+        chunks = []
+        if log.is_file():
+            try:
+                chunks.append(log.read_bytes()[pre_size:].decode("utf-8", "replace"))
+            except OSError:
+                pass
+        try:
+            chunks.append(console_log.read_bytes().decode("utf-8", "replace"))
+        except OSError:
+            pass
+        text = "\n".join(chunks)
+        render = next((l.strip() for l in text.splitlines()
+                       if "UI_QT_RENDER" in l and "FAIL" not in l), "")
+        colors = 0
+        if "colors=" in render:
+            try:
+                colors = int(render.split("colors=")[1].split()[0])
+            except (IndexError, ValueError):
+                colors = 0
+        results.append(("Qt 窗口已打开", "UI_QT_MODE" in text,
+                        next((l.strip() for l in text.splitlines()
+                              if "UI_QT_MODE" in l), "窗口没打开")))
+        results.append(("界面已渲染", colors > 3,
+                        f"{render}（颜色种类 > 3 说明画面有内容）"
+                        if colors > 3 else (render or "抓图失败")))
+        results.append(("窗口正常退出", "UI_QT_SELFTEST_OK" in text, "退出干净"))
+        big = exe.stat().st_size / 1048576
+        results.append(("体积", big < 400, f"{big:.1f} MB"))
+        ok = _report(results)
+        print("      ✓ Qt 界面版功能完整（原生窗口已实测打开并渲染）" if ok
+              else "      ✗ Qt 界面版校验未通过")
+        return 0 if ok else 1
+    finally:
+        _best_effort_cleanup(dist)
+
+
 def verify_console(exe: Path, dist: Path) -> int:
     """控制台版：起服务、打接口。"""
     port = free_port()
@@ -358,12 +502,7 @@ def verify_console(exe: Path, dist: Path) -> int:
         print("      ✓ 控制台版功能完整" if ok else "      ✗ 校验未通过")
         return 0 if ok else 1
     finally:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+        _kill_tree(proc)
 
 
 def verify_desktop(exe: Path, dist: Path) -> int:
@@ -409,11 +548,7 @@ def verify_desktop(exe: Path, dist: Path) -> int:
         exited = proc.poll() is not None
         exit_code = proc.returncode
         if not exited:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            _kill_tree(proc)
             exit_code = proc.returncode
 
         text = ""
@@ -471,22 +606,20 @@ def verify_desktop(exe: Path, dist: Path) -> int:
               else "      ✗ 校验未通过")
         return 0 if ok else 1
     finally:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+        _kill_tree(proc)
         # 校验过程产生的运行期残留清掉（删不掉也不影响结果）
         _best_effort_cleanup(dist)
+
+
+VERIFIERS = {"desktop": verify_desktop, "qt": verify_qt, "console": verify_console}
 
 
 # ================================================================ 主流程
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="打包 mc-panel 为单文件 exe")
-    ap.add_argument("--mode", choices=["both", "desktop", "console"], default="both",
-                    help="打包哪个版本，默认两个都打")
+    ap.add_argument("--mode", choices=["both", "desktop", "qt", "console"],
+                    default="both", help="打包哪个版本，默认全打")
     ap.add_argument("--check", action="store_true", help="只检查打包环境")
     ap.add_argument("--verify-only", action="store_true",
                     help="不重新打包，只校验 dist 里已有的 exe")
@@ -507,7 +640,7 @@ def main() -> int:
         for key in existing:
             exe = dist / f"{VARIANTS[key]['name']}.exe"
             print(f"\n--- {VARIANTS[key]['title']}：{exe.name} ---")
-            code = (verify_desktop if key == "desktop" else verify_console)(exe, dist)
+            code = VERIFIERS[key](exe, dist)
             if code != 0:
                 return code
         return 0
@@ -557,7 +690,7 @@ def main() -> int:
     for key in built:
         exe = dist / f"{VARIANTS[key]['name']}.exe"
         print(f"\n--- {VARIANTS[key]['title']}：{exe.name} ---")
-        code = (verify_desktop if key == "desktop" else verify_console)(exe, dist)
+        code = VERIFIERS[key](exe, dist)
         if code != 0:
             return code
 
