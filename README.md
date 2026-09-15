@@ -116,7 +116,7 @@ mc-panel/
 ├─ run.bat / run.sh        # 双击启动脚本
 ├─ build_exe.bat           # 一键打包 exe（推荐）
 ├─ build_exe.py            # 打包脚本主体（PyInstaller + 自动验证）
-├─ build_zip.py            # 打包成可分发 zip
+├─ build_zip.bat / .py     # 打包源码 zip（自动收录 + 解压试跑校验）
 ├─ make_icon.py            # 生成 app.ico（纯标准库画图标）
 ├─ app.ico                 # 应用图标
 ├─ .buildenv/              # 打包用的隔离 Python 环境（自动生成，可删）
@@ -212,12 +212,56 @@ python -m venv .buildenv
 
 ### 打包源码 zip
 
+**最省事：双击 `build_zip.bat`**（源码打包只用标准库 `zipfile`，不需要虚拟环境、不用装任何东西）
+
 ```bash
-python build_zip.py        # 产出 ../mc-panel-v<版本>-src.zip
+python build_zip.py                 # 打包 + 自动校验，约 10 秒
+python build_zip.py --list          # 只看会打进去哪些文件，不打包
+python build_zip.py --no-verify     # 跳过校验（快，但别这么发版）
+python build_zip.py --out D:\x.zip  # 指定输出路径
 ```
 
-约 570 KB，解压即用；`__pycache__`、`servers/`、`panel.json`、`build/`、`dist/`、`.buildenv/`
-等运行期与打包产物都会被排除。
+产物是上级目录下的 `mc-panel-v<版本>-src.zip`（约 580 KB）。
+
+两个设计要点：
+
+1. **默认自动收录**整个项目，靠排除规则把不该进包的东西挡掉 ——
+   以后新增源码/文档**不用改脚本**，不会漏打。排除项：
+   `__pycache__`、`.buildenv/`、`build/`、`dist/`、`servers/`、`.webview/`、
+   `panel.json`、`*.log`、`*.exe/dll/zip`、IDE 目录等。
+
+2. **打完会解压到临时目录真跑一次 `panel.py --check`** ——
+   确认发出去的源码是能跑的，而不是"文件都在但一 import 就炸"：
+
+```
+校验压缩包
+  ✓ 必备文件          21/21
+  ✓ CRC 完整性        全部通过
+  ✓ 未混入运行期产物   干净
+  ✓ 未混入二进制       干净
+  ✓ 体积             原始 1062.2 KB -> 压缩后 578.1 KB（29 个文件）
+  ✓ 解压后能运行      panel.py --check 退出码 0
+```
+
+同理，`build_exe.py` 打完也会把 exe 真跑起来验证（见上一节）。
+
+### 发新版本
+
+版本号**只有一个来源**：`mcpanel/__init__.py` 里的 `__version__`。
+两个打包脚本都从那里读，所以发版只需三步：
+
+```bash
+# 1. 改版本号（改这一处即可，exe 属性、zip 文件名、面板页脚都会跟着变）
+#    mcpanel/__init__.py:  __version__ = "1.1.0"
+
+# 2. 打 exe（会写进 Windows 文件属性）
+build_exe.bat
+
+# 3. 打源码包
+build_zip.bat
+```
+
+拿到的就是 `dist/mc-panel.exe`、`dist/mc-panel-console.exe`、`../mc-panel-v1.1.0-src.zip`。
 
 ## 常见问题
 

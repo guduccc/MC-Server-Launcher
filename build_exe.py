@@ -25,7 +25,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "1.0.0"
+sys.path.insert(0, str(ROOT))
+from mcpanel import __version__ as VERSION      # noqa: E402  版本号单一来源
 
 # 两个发行版本
 #   desktop —— 桌面窗口版：原生窗口（WebView2），无控制台，双击就是一个应用
